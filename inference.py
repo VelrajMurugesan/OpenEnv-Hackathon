@@ -167,6 +167,7 @@ def run_task(task_id: str) -> dict:
     })
 
     # Submit each finding as a step
+    result = None
     for i, finding in enumerate(findings):
         if finding.get("action") == "approve":
             action = {
@@ -199,7 +200,7 @@ def run_task(task_id: str) -> dict:
             break
 
     # Submit final report
-    if not result.get("done", False):
+    if result is None or not result.get("done", False):
         result = env_request("POST", "/step", {"action": {"action": "submit_report"}})
         step_num += 1
 
