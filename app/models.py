@@ -135,7 +135,7 @@ class EnvState(BaseModel):
 
 
 class ResetRequest(BaseModel):
-    task_id: str
+    task_id: str = "easy_1"
 
 
 class StepRequest(BaseModel):

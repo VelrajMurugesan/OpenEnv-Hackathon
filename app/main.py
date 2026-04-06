@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.engine import EnvironmentManager
@@ -59,14 +61,22 @@ def list_tasks() -> list[TaskInfo]:
 
 
 @app.post("/reset", response_model=EnvState)
-def reset(request: ResetRequest) -> EnvState:
+def reset(
+    request: Optional[ResetRequest] = None,
+    task_id: Optional[str] = Query(None),
+) -> EnvState:
     """Reset the environment with a specific task.
 
-    This initializes a new session with the given task's invoices.
-    The agent should then read the state and begin auditing.
+    Task ID can be provided via JSON body {"task_id": "easy_1"},
+    query parameter ?task_id=easy_1, or omitted to default to easy_1.
     """
     try:
-        return env.reset(request.task_id)
+        resolved_task_id = "easy_1"
+        if request and request.task_id:
+            resolved_task_id = request.task_id
+        elif task_id:
+            resolved_task_id = task_id
+        return env.reset(resolved_task_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
