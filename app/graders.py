@@ -4,6 +4,21 @@ from __future__ import annotations
 
 from app.models import GraderResult, GroundTruthIssue
 
+# OpenEnv validator requires task scores to lie strictly within (0, 1) — never 0.0
+# and never 1.0. We clamp every grader output into this open interval using a
+# small epsilon so a perfect or empty result still resolves to a valid score.
+SCORE_MIN = 0.0001
+SCORE_MAX = 0.9999
+
+
+def _clamp_score(value: float) -> float:
+    """Clamp a raw score into the strict open interval (0, 1)."""
+    if value <= SCORE_MIN:
+        return SCORE_MIN
+    if value >= SCORE_MAX:
+        return SCORE_MAX
+    return round(value, 4)
+
 
 def _normalize(text: str) -> str:
     """Lowercase and strip for fuzzy matching."""
@@ -114,7 +129,7 @@ def grade_findings(
         if not findings:
             return GraderResult(
                 task_id=task_id,
-                score=1.0,
+                score=_clamp_score(1.0),
                 details={
                     "message": "Correctly identified no issues",
                     "precision": 1.0,
@@ -129,7 +144,7 @@ def grade_findings(
             penalty = min(len(findings) * 0.2, 1.0)
             return GraderResult(
                 task_id=task_id,
-                score=max(0.0, 1.0 - penalty),
+                score=_clamp_score(1.0 - penalty),
                 details={
                     "message": f"No real issues but agent flagged {len(findings)} false positives",
                     "precision": 0.0,
@@ -143,7 +158,7 @@ def grade_findings(
     if not findings:
         return GraderResult(
             task_id=task_id,
-            score=0.0,
+            score=_clamp_score(0.0),
             details={
                 "message": f"Agent found no issues but {len(ground_truth)} exist",
                 "precision": 0.0,
@@ -195,7 +210,7 @@ def grade_findings(
     else:
         f1 = 0.0
 
-    score = round(min(max(f1, 0.0), 1.0), 4)
+    score = _clamp_score(f1)
 
     missed = [
         {

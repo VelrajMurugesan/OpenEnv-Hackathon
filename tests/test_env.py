@@ -100,7 +100,8 @@ def test_submit_report():
     response = env.step(AgentAction(action=ActionType.SUBMIT_REPORT))
     assert response.done is True
     assert response.state.score is not None
-    assert 0.0 <= response.state.score <= 1.0
+    # OpenEnv validator requires scores strictly in the open interval (0, 1).
+    assert 0.0 < response.state.score < 1.0
     print(f"  [PASS] submit_report works (score={response.state.score:.4f})")
 
 
@@ -127,13 +128,21 @@ def test_grader_perfect_score():
 
 
 def test_grader_zero_score():
-    """Test that submitting with no findings gives score 0."""
+    """Test that submitting with no findings gives the floor score.
+
+    The OpenEnv validator rejects exact 0.0 / 1.0 scores, so the grader
+    clamps into the strict open interval (0, 1). A "no findings" result
+    therefore lands at the floor (SCORE_MIN), not literal 0.0.
+    """
+    from app.graders import SCORE_MIN
+
     env = EnvironmentManager()
     env.reset("easy_1")
 
     response = env.step(AgentAction(action=ActionType.SUBMIT_REPORT))
-    assert response.state.score == 0.0
-    print("  [PASS] No findings gives score 0.0")
+    assert response.state.score == SCORE_MIN
+    assert 0.0 < response.state.score < 1.0
+    print(f"  [PASS] No findings clamps to floor score ({SCORE_MIN})")
 
 
 def test_max_steps_auto_grade():

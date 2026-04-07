@@ -151,5 +151,8 @@ class StepResponse(BaseModel):
 
 class GraderResult(BaseModel):
     task_id: str
-    score: float = Field(ge=0.0, le=1.0)
+    # OpenEnv validator requires task scores strictly in (0, 1) — never exactly
+    # 0.0 or 1.0 — so the grader must clamp into the open interval before
+    # constructing this model.
+    score: float = Field(gt=0.0, lt=1.0)
     details: dict[str, Any] = {}
