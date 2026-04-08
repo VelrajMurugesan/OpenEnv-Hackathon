@@ -1,12 +1,23 @@
 """Baseline inference script for the GST Invoice Compliance Checker OpenEnv.
 
 Hybrid approach: programmatic validation for deterministic rules + LLM for
-complex interpretation. This maximizes both precision and recall.
+complex interpretation.
+
+This script is what the OpenEnv hackathon Phase 2 deep-validator runs as a
+subprocess. It MUST emit `[START]`, `[STEP]` and `[END]` log lines on stdout
+in space-separated `key=value` format (matching the official sample
+inference.py from ArjunMadhava/meta-hackathon-2026). The validator regex-parses
+these lines to extract per-task scores and asserts that every score is
+strictly inside the open interval (0, 1) — never exactly 0.0 or 1.0.
+
+All non-protocol diagnostic output goes to stderr via `log_diagnostic` so it
+cannot pollute the parser.
 
 Configuration via environment variables:
   - API_BASE_URL: LLM endpoint (e.g. https://api.openai.com/v1)
-  - MODEL_NAME: Model identifier (e.g. gpt-4o)
-  - HF_TOKEN: Hugging Face token for authentication
+  - MODEL_NAME:   Model identifier (e.g. gpt-4o)
+  - HF_TOKEN:     Hugging Face token for authentication
+  - ENV_URL:      Base URL of the running OpenEnv environment
 """
 
 from __future__ import annotations
@@ -15,6 +26,7 @@ import json
 import os
 import re
 import sys
+import traceback
 
 import httpx
 from openai import OpenAI
@@ -36,6 +48,37 @@ TASK_IDS = [
     "medium_1", "medium_2", "medium_3",
     "hard_1", "hard_2", "hard_3",
 ]
+
+# Action ID mapping for the [STEP] log — the validator expects an integer
+# action= field even though our env uses string action types.
+ACTION_ID = {
+    "reset": -1,
+    "flag_issue": 0,
+    "approve": 1,
+    "submit_report": 2,
+}
+
+# OpenEnv validator requires per-task scores strictly in (0, 1) — never 0.0
+# or 1.0 — so we clamp client-side as a defense-in-depth layer on top of the
+# server's grader clamp.
+SCORE_MIN = 0.0001
+SCORE_MAX = 0.9998
+
+
+def clamp_score(value: float) -> float:
+    """Clamp any score into the strict open interval (0, 1)."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return SCORE_MIN
+    if v != v:  # NaN
+        return SCORE_MIN
+    if v <= SCORE_MIN:
+        return SCORE_MIN
+    if v >= SCORE_MAX:
+        return SCORE_MAX
+    return v
+
 
 # ── HSN → Valid Tax Rates (exact copy from data/hsn_codes.py) ───────────────
 
@@ -65,11 +108,61 @@ VALID_STATE_CODES = {f"{i:02d}" for i in range(1, 39)}
 RCM_HSN_CODES = {"9961", "9962", "9971", "9973", "9985"}
 GSTIN_PATTERN = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")
 
-# ── Helpers ─────────────────────────────────────────────────────────────────
+
+# ── Validator-protocol log emitters ─────────────────────────────────────────
 
 
-def log(tag: str, data: dict) -> None:
-    print(f"[{tag}] {json.dumps(data)}", flush=True)
+def log_diagnostic(message: str) -> None:
+    """Send free-form diagnostic info to stderr so it never pollutes the
+    validator's stdout parser."""
+    print(message, file=sys.stderr, flush=True)
+
+
+def emit_start(task_id: str) -> None:
+    """Emit the canonical [START] line for a task."""
+    print(f"[START] task={task_id}", flush=True)
+
+
+def emit_step(
+    task_id: str,
+    step_count: int,
+    reward: float,
+    action_id: int,
+    done: bool,
+) -> None:
+    """Emit the canonical [STEP] line for a single env step."""
+    print(
+        "[STEP] "
+        f"task={task_id} "
+        f"step={step_count} "
+        f"reward={float(reward):.4f} "
+        f"action={action_id} "
+        f"done={str(bool(done)).lower()}",
+        flush=True,
+    )
+
+
+def emit_end(task_id: str, score: float, steps: int, status: str) -> None:
+    """Emit the canonical [END] line for a finished task. The score is always
+    clamped strictly into (0, 1) to satisfy the Phase 2 validator."""
+    safe = clamp_score(score)
+    print(
+        f"[END] task={task_id} score={safe:.4f} steps={steps} status={status}",
+        flush=True,
+    )
+
+
+def emit_setup_failure(task_id: str, reason: str) -> None:
+    """Emit a fully valid [START]/[STEP]/[END] sequence for a task that
+    crashed before it could legitimately produce a score. The score is still
+    clamped to the (0, 1) floor so the validator does not flag it as out of
+    range."""
+    emit_start(task_id)
+    emit_step(task_id=task_id, step_count=0, reward=0.0, action_id=-1, done=False)
+    emit_end(task_id, SCORE_MIN, 0, reason)
+
+
+# ── HTTP helper ─────────────────────────────────────────────────────────────
 
 
 def env_request(method: str, endpoint: str, payload: dict | None = None) -> dict:
@@ -352,180 +445,188 @@ def parse_llm_response(response_text: str) -> list[dict]:
 # ── Main Inference Loop ─────────────────────────────────────────────────────
 
 
-def run_task(task_id: str) -> dict:
-    """Run inference on a single task."""
-    log("START", {"task_id": task_id, "model": MODEL_NAME})
+def call_llm_review(invoices: list[dict], findings: list[dict]) -> list[dict]:
+    """Best-effort LLM review pass. Returns [] on any error."""
+    try:
+        review_prompt = build_llm_review_prompt(invoices, findings)
+        llm_response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a senior Indian GST compliance auditor. "
+                        "An automated system already found most issues. "
+                        "Only flag genuinely missed violations. Be precise, not verbose. "
+                        "Respond only with valid JSON."
+                    ),
+                },
+                {"role": "user", "content": review_prompt},
+            ],
+            temperature=0.0,
+            max_tokens=2048,
+        )
+        response_text = llm_response.choices[0].message.content or "[]"
+        return parse_llm_response(response_text)
+    except Exception as exc:
+        log_diagnostic(f"[WARN] LLM review failed: {exc}")
+        return []
 
-    # Reset environment
-    state = env_request("POST", "/reset", {"task_id": task_id})
-    step_num = 0
 
-    log("STEP", {
-        "task_id": task_id,
-        "step": step_num,
-        "action": "reset",
-        "num_invoices": len(state["invoices"]),
-    })
+def run_task(task_id: str) -> float:
+    """Run inference on a single task. Always emits exactly one [START],
+    one or more [STEP]s, and exactly one [END] line. The returned score is
+    clamped to the open interval (0, 1)."""
+    emit_start(task_id)
 
-    # ── Pass 1: Programmatic rule-based audit (high precision) ──
-    invoices = state["invoices"]
-    findings = programmatic_audit(invoices)
+    step_count = 0
+    final_score = SCORE_MIN
+    status = "completed"
 
-    step_num += 1
-    log("STEP", {
-        "task_id": task_id,
-        "step": step_num,
-        "action": "programmatic_audit",
-        "findings_count": len(findings),
-    })
+    try:
+        # Reset environment
+        state = env_request("POST", "/reset", {"task_id": task_id})
+        invoices = state.get("invoices", [])
+        log_diagnostic(f"[INFO] {task_id}: reset ok ({len(invoices)} invoices)")
 
-    # ── Pass 2: LLM review for anything rules missed ──
-    review_prompt = build_llm_review_prompt(invoices, findings)
+        # ── Pass 1: Programmatic rule-based audit ──
+        findings = programmatic_audit(invoices)
+        log_diagnostic(f"[INFO] {task_id}: programmatic_audit found {len(findings)} issues")
 
-    llm_response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a senior Indian GST compliance auditor. "
-                    "An automated system already found most issues. "
-                    "Only flag genuinely missed violations. Be precise, not verbose. "
-                    "Respond only with valid JSON."
-                ),
-            },
-            {"role": "user", "content": review_prompt},
-        ],
-        temperature=0.0,
-        max_tokens=2048,
-    )
+        # ── Pass 2: LLM review (best effort) ──
+        extra_findings = call_llm_review(invoices, findings)
 
-    response_text = llm_response.choices[0].message.content or "[]"
-    extra_findings = parse_llm_response(response_text)
+        # Merge LLM findings (deduplicate)
+        seen = {(f.get("invoice_id", ""), f.get("field", "")) for f in findings}
+        added = 0
+        for ef in extra_findings:
+            if not isinstance(ef, dict):
+                continue
+            if ef.get("action") == "approve":
+                continue
+            key = (ef.get("invoice_id", ""), ef.get("field", ""))
+            if key not in seen:
+                findings.append(ef)
+                seen.add(key)
+                added += 1
+        log_diagnostic(f"[INFO] {task_id}: llm_review added {added} extras (total={len(findings)})")
 
-    # Merge LLM findings (deduplicate)
-    seen = {(f.get("invoice_id", ""), f.get("field", "")) for f in findings}
-    added = 0
-    for ef in extra_findings:
-        if ef.get("action") == "approve":
-            continue
-        key = (ef.get("invoice_id", ""), ef.get("field", ""))
-        if key not in seen:
-            findings.append(ef)
-            seen.add(key)
-            added += 1
+        # ── Identify clean invoices and approve them ──
+        invoice_ids = {inv.get("invoice_id", "") for inv in invoices}
+        flagged_ids = {f.get("invoice_id", "") for f in findings}
+        clean_ids = invoice_ids - flagged_ids
 
-    step_num += 1
-    log("STEP", {
-        "task_id": task_id,
-        "step": step_num,
-        "action": "llm_review",
-        "llm_extra": len(extra_findings),
-        "added": added,
-        "total_findings": len(findings),
-    })
-
-    # ── Identify clean invoices and approve them ──
-    invoice_ids = {inv.get("invoice_id", "") for inv in invoices}
-    flagged_ids = {f.get("invoice_id", "") for f in findings}
-    clean_ids = invoice_ids - flagged_ids
-
-    # Submit findings as steps
-    result = None
-    for finding in findings:
-        action = {
-            "action": "flag_issue",
-            "invoice_id": finding.get("invoice_id", ""),
-            "field": finding.get("field", ""),
-            "category": finding.get("category", ""),
-            "severity": finding.get("severity", "major"),
-            "description": finding.get("description", ""),
-        }
-        result = env_request("POST", "/step", {"action": action})
-        step_num += 1
-
-        log("STEP", {
-            "task_id": task_id,
-            "step": step_num,
-            "action": "flag_issue",
-            "invoice_id": action["invoice_id"],
-            "reward": result.get("reward", 0),
-            "done": result.get("done", False),
-        })
-
-        if result.get("done", False):
-            break
-
-    # Approve clean invoices
-    if result is None or not result.get("done", False):
-        for clean_id in clean_ids:
-            result = env_request("POST", "/step", {"action": {"action": "approve", "invoice_id": clean_id}})
-            step_num += 1
-
-            log("STEP", {
-                "task_id": task_id,
-                "step": step_num,
-                "action": "approve",
-                "invoice_id": clean_id,
-                "reward": result.get("reward", 0),
-                "done": result.get("done", False),
-            })
-
+        # Submit findings as flag_issue actions
+        result: dict | None = None
+        for finding in findings:
+            action = {
+                "action": "flag_issue",
+                "invoice_id": finding.get("invoice_id", ""),
+                "field": finding.get("field", ""),
+                "category": finding.get("category", ""),
+                "severity": finding.get("severity", "major"),
+                "description": finding.get("description", ""),
+            }
+            result = env_request("POST", "/step", {"action": action})
+            step_count += 1
+            emit_step(
+                task_id=task_id,
+                step_count=step_count,
+                reward=result.get("reward", 0.0),
+                action_id=ACTION_ID["flag_issue"],
+                done=bool(result.get("done", False)),
+            )
             if result.get("done", False):
                 break
 
-    # Submit final report
-    if result is None or not result.get("done", False):
-        result = env_request("POST", "/step", {"action": {"action": "submit_report"}})
-        step_num += 1
+        # Approve clean invoices
+        if result is None or not result.get("done", False):
+            for clean_id in clean_ids:
+                result = env_request("POST", "/step", {
+                    "action": {"action": "approve", "invoice_id": clean_id}
+                })
+                step_count += 1
+                emit_step(
+                    task_id=task_id,
+                    step_count=step_count,
+                    reward=result.get("reward", 0.0),
+                    action_id=ACTION_ID["approve"],
+                    done=bool(result.get("done", False)),
+                )
+                if result.get("done", False):
+                    break
 
-    score = result.get("state", {}).get("score", 0.0)
-    grader_info = result.get("info", {}).get("grader_result", {})
+        # Submit final report if not already done
+        if result is None or not result.get("done", False):
+            result = env_request("POST", "/step", {"action": {"action": "submit_report"}})
+            step_count += 1
+            emit_step(
+                task_id=task_id,
+                step_count=step_count,
+                reward=result.get("reward", 0.0),
+                action_id=ACTION_ID["submit_report"],
+                done=bool(result.get("done", False)),
+            )
 
-    log("END", {
-        "task_id": task_id,
-        "score": score,
-        "steps": step_num,
-        "precision": grader_info.get("details", {}).get("precision", 0),
-        "recall": grader_info.get("details", {}).get("recall", 0),
-        "true_positives": grader_info.get("details", {}).get("true_positives", 0),
-        "false_positives": grader_info.get("details", {}).get("false_positives", 0),
-        "missed_issues": grader_info.get("details", {}).get("missed_issues", 0),
-    })
+        raw_score = result.get("state", {}).get("score") if result else None
+        if raw_score is None:
+            log_diagnostic(f"[WARN] {task_id}: no score in final state, defaulting to floor")
+            status = "incomplete"
+        final_score = clamp_score(raw_score if raw_score is not None else SCORE_MIN)
 
-    return {"task_id": task_id, "score": score, "steps": step_num}
+        grader_info = (result or {}).get("info", {}).get("grader_result", {}).get("details", {})
+        log_diagnostic(
+            f"[INFO] {task_id}: score={final_score:.4f} "
+            f"precision={grader_info.get('precision', 0)} "
+            f"recall={grader_info.get('recall', 0)} "
+            f"tp={grader_info.get('true_positives', 0)} "
+            f"fp={grader_info.get('false_positives', 0)} "
+            f"missed={grader_info.get('missed_issues', 0)}"
+        )
+
+    except Exception as exc:
+        status = "error"
+        log_diagnostic(f"[ERROR] {task_id}: {exc}")
+        log_diagnostic(traceback.format_exc())
+        # Make sure we still emit at least one step so the protocol is complete.
+        if step_count == 0:
+            emit_step(task_id=task_id, step_count=0, reward=0.0, action_id=-1, done=False)
+            step_count = 1
+        final_score = SCORE_MIN
+
+    emit_end(task_id, final_score, step_count, status)
+    return clamp_score(final_score)
 
 
 def main() -> None:
-    """Run inference on all tasks."""
-    print("=" * 60, flush=True)
-    print("GST Invoice Compliance Checker — Baseline Inference", flush=True)
-    print(f"Model: {MODEL_NAME}", flush=True)
-    print(f"Environment: {ENV_URL}", flush=True)
-    print("=" * 60, flush=True)
+    """Run inference on all tasks. Diagnostics go to stderr; only the
+    canonical [START]/[STEP]/[END] log lines go to stdout."""
+    log_diagnostic("=" * 60)
+    log_diagnostic("GST Invoice Compliance Checker — Inference")
+    log_diagnostic(f"Model:       {MODEL_NAME}")
+    log_diagnostic(f"Environment: {ENV_URL}")
+    log_diagnostic("=" * 60)
 
-    results = []
-    total_score = 0.0
-
+    scores: list[float] = []
     for task_id in TASK_IDS:
         try:
-            result = run_task(task_id)
-            results.append(result)
-            total_score += result["score"]
-        except Exception as e:
-            print(f"[ERROR] Task {task_id} failed: {e}", flush=True)
-            log("END", {"task_id": task_id, "score": 0.0, "error": str(e)})
-            results.append({"task_id": task_id, "score": 0.0, "error": str(e)})
+            score = run_task(task_id)
+        except Exception as exc:
+            log_diagnostic(f"[FATAL] {task_id}: unhandled exception: {exc}")
+            log_diagnostic(traceback.format_exc())
+            emit_setup_failure(task_id, "fatal_error")
+            score = SCORE_MIN
+        scores.append(clamp_score(score))
 
-    avg_score = total_score / len(TASK_IDS) if TASK_IDS else 0.0
-    print("\n" + "=" * 60, flush=True)
-    print("RESULTS SUMMARY", flush=True)
-    print("=" * 60, flush=True)
-    for r in results:
-        status = "PASS" if r.get("score", 0) >= 0.5 else "FAIL"
-        print(f"  [{status}] {r['task_id']}: score={r.get('score', 0):.4f}", flush=True)
-    print(f"\n  Average Score: {avg_score:.4f}", flush=True)
-    print("=" * 60, flush=True)
+    avg = sum(scores) / len(scores) if scores else 0.0
+    log_diagnostic("=" * 60)
+    log_diagnostic("RESULTS SUMMARY")
+    log_diagnostic("=" * 60)
+    for task_id, s in zip(TASK_IDS, scores):
+        tag = "PASS" if s >= 0.5 else "FAIL"
+        log_diagnostic(f"  [{tag}] {task_id}: score={s:.4f}")
+    log_diagnostic(f"\n  Average Score: {avg:.4f}")
+    log_diagnostic("=" * 60)
 
 
 if __name__ == "__main__":

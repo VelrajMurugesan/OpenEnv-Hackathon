@@ -5,10 +5,11 @@ from __future__ import annotations
 from app.models import GraderResult, GroundTruthIssue
 
 # OpenEnv validator requires task scores to lie strictly within (0, 1) — never 0.0
-# and never 1.0. We clamp every grader output into this open interval using a
-# small epsilon so a perfect or empty result still resolves to a valid score.
+# and never 1.0. We clamp every grader output into this open interval. SCORE_MAX
+# is set to 0.9998 (not 0.9999) so that downstream `:.4f` formatting in the
+# inference log can never round up to "1.0000".
 SCORE_MIN = 0.0001
-SCORE_MAX = 0.9999
+SCORE_MAX = 0.9998
 
 
 def _clamp_score(value: float) -> float:
