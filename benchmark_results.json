@@ -1,9 +1,45 @@
 {
-  "env_url": "http://127.0.0.1:7861",
+  "env_url": "https://velrajmurugesan-gst-invoice-compliance-checker.hf.space",
   "results": [
     {
       "model_id": "programmatic",
       "label": "Programmatic Only (no LLM)",
+      "average": 0.9911200000000001,
+      "per_task": {
+        "easy_1": 0.9998,
+        "easy_2": 0.9998,
+        "easy_3": 0.9998,
+        "medium_1": 0.9998,
+        "medium_2": 0.913,
+        "medium_3": 0.9998,
+        "hard_1": 0.9998,
+        "hard_2": 0.9998,
+        "hard_3": 0.9998,
+        "hard_4": 0.9998
+      },
+      "error": ""
+    },
+    {
+      "model_id": "gpt-4o-mini",
+      "label": "GPT-4o-mini (hybrid)",
+      "average": 0.9911200000000001,
+      "per_task": {
+        "easy_1": 0.9998,
+        "easy_2": 0.9998,
+        "easy_3": 0.9998,
+        "medium_1": 0.9998,
+        "medium_2": 0.913,
+        "medium_3": 0.9998,
+        "hard_1": 0.9998,
+        "hard_2": 0.9998,
+        "hard_3": 0.9998,
+        "hard_4": 0.9998
+      },
+      "error": ""
+    },
+    {
+      "model_id": "gpt-4o",
+      "label": "GPT-4o (hybrid)",
       "average": 0.9911200000000001,
       "per_task": {
         "easy_1": 0.9998,
