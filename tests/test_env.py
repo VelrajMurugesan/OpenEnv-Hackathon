@@ -11,22 +11,22 @@ from app.models import ActionType, AgentAction
 
 
 def test_all_tasks_load():
-    """Verify all 9 tasks load without errors."""
+    """Verify all 10 tasks load without errors."""
     env = EnvironmentManager()
     tasks = env.get_task_list()
-    assert len(tasks) == 9, f"Expected 9 tasks, got {len(tasks)}"
+    assert len(tasks) == 10, f"Expected 10 tasks, got {len(tasks)}"
     print(f"  [PASS] All {len(tasks)} tasks loaded")
 
 
 def test_task_difficulties():
-    """Verify correct difficulty distribution."""
+    """Verify correct difficulty distribution: 3 easy / 3 medium / 4 hard."""
     env = EnvironmentManager()
     tasks = env.get_task_list()
     difficulties = [t.difficulty.value for t in tasks]
     assert difficulties.count("easy") == 3
     assert difficulties.count("medium") == 3
-    assert difficulties.count("hard") == 3
-    print("  [PASS] Difficulty distribution: 3 easy, 3 medium, 3 hard")
+    assert difficulties.count("hard") == 4
+    print("  [PASS] Difficulty distribution: 3 easy, 3 medium, 4 hard")
 
 
 def test_reset_and_state():

@@ -24,7 +24,7 @@ from app.tasks.medium import get_medium_task
 ALL_TASK_IDS = [
     "easy_1", "easy_2", "easy_3",
     "medium_1", "medium_2", "medium_3",
-    "hard_1", "hard_2", "hard_3",
+    "hard_1", "hard_2", "hard_3", "hard_4",
 ]
 
 

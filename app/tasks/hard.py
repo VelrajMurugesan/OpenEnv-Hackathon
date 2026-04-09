@@ -479,12 +479,174 @@ TASK_H3_INVOICES = [
 ]
 
 
+# ── Task H4: Adversarial Edge Cases — Resist Over-Flagging ────────────────
+#
+# This task is the deliberate "trap" task. Three invoices that LOOK suspicious
+# to a careless reader (or a careless LLM) but where TWO of them are actually
+# fully compliant. The agent must resist the temptation to over-flag and
+# correctly approve the clean invoices while finding the ONE real violation.
+#
+# Why this matters: in real-world GST audit, false positives are costly —
+# they generate notices that taxpayers must respond to, eroding trust in the
+# audit system. A high-quality auditor must have high *precision*, not just
+# high recall. This task explicitly stresses that.
+#
+# Educational ambiguity by invoice:
+#   - INV-H4-001: T-shirts taxed at 12%. Looks like a rate violation
+#                 (garments "should" be 5%). Actually valid: HSN 6109 has
+#                 BOTH 5% and 12% as legal rates per CBIC Notification
+#                 1/2017. The 12% rate applies to higher-value garments;
+#                 5% applies under a price threshold the env does not
+#                 model. The auto-validator therefore correctly accepts
+#                 either rate as compliant.
+#   - INV-H4-002: Inter-state supply with NO e-way bill. Looks like a
+#                 mandatory e-way violation. Actually valid: total invoice
+#                 value is INR 47,200 — strictly UNDER the INR 50,000
+#                 e-way bill threshold. E-way bill is optional below the
+#                 threshold.
+#   - INV-H4-003: Office furniture invoice with the recipient_state_code
+#                 set to "27" (Maharashtra) but the recipient_gstin starts
+#                 with "07" (Delhi). This is THE only legitimate issue —
+#                 GSTIN-state inconsistency. Auto-validator catches it.
+#
+# Perfect agent behavior:
+#   - flag_issue(INV-H4-003, recipient_state_code, inconsistency)
+#   - approve(INV-H4-001)
+#   - approve(INV-H4-002)
+#   - submit_report
+#
+# Sloppy agent behavior (will be penalized):
+#   - flagging the 12% T-shirt rate as wrong
+#   - flagging the missing e-way bill as a violation
+#   - flagging both leads to false positives → low precision → low score
+
+TASK_H4_INFO = TaskInfo(
+    task_id="hard_4",
+    name="Adversarial Edge Cases — Resist Over-Flagging",
+    description=(
+        "This is an adversarial precision test. The 3 invoices in this batch "
+        "look suspicious at first glance, but only ONE has a real GST "
+        "compliance violation. The other two are fully compliant despite "
+        "appearing to bend the rules. Your job: find the real issue, "
+        "correctly approve the two clean invoices, and avoid the over-"
+        "flagging trap. Real-world GST audits are graded on precision, not "
+        "just recall — false positives cost taxpayers time and erode trust."
+    ),
+    difficulty=TaskDifficulty.HARD,
+    max_steps=20,
+    num_invoices=3,
+)
+
+TASK_H4_INVOICES = [
+    # Invoice 1: TRAP — T-shirts at 12% looks high, but HSN 6109 has [5, 12]
+    # both as legal rates per CBIC. Fully compliant.
+    Invoice(
+        invoice_id="INV-H4-001",
+        invoice_number="INV/2025/0801",
+        invoice_date="2025-04-02",
+        supplier_name="Premium Apparel Pvt Ltd",
+        supplier_gstin="27AABCP1111Q1Z5",
+        supplier_state_code="27",  # Maharashtra
+        recipient_name="Mumbai Retail Hub",
+        recipient_gstin="27BCDER2222S1Z3",
+        recipient_state_code="27",  # Maharashtra — intra-state
+        place_of_supply="27",
+        supply_type="B2B",
+        line_items=[
+            InvoiceLineItem(
+                description="Premium cotton T-shirts",
+                hsn_code="6109",  # T-shirts: valid rates [5, 12]
+                quantity=100,
+                unit_price=1500.0,
+                taxable_value=150000.0,
+                tax_rate=12.0,  # VALID — 12% is in HSN_RATES[6109]
+                tax_type=TaxType.CGST_SGST,
+                cgst_amount=9000.0,
+                sgst_amount=9000.0,
+                total_amount=168000.0,
+            ),
+        ],
+        total_taxable_value=150000.0,
+        total_tax=18000.0,
+        total_invoice_value=168000.0,
+    ),
+    # Invoice 2: TRAP — inter-state with no e-way bill, but total < INR 50,000
+    # so e-way bill is OPTIONAL. Fully compliant.
+    Invoice(
+        invoice_id="INV-H4-002",
+        invoice_number="INV/2025/0802",
+        invoice_date="2025-04-03",
+        supplier_name="Delhi Compute Traders",
+        supplier_gstin="07AABCD3333T1Z2",
+        supplier_state_code="07",  # Delhi
+        recipient_name="Bangalore Tech",
+        recipient_gstin="29BCDEB4444U1Z9",
+        recipient_state_code="29",  # Karnataka — inter-state
+        place_of_supply="29",
+        supply_type="B2B",
+        line_items=[
+            InvoiceLineItem(
+                description="Single workstation",
+                hsn_code="8471",
+                quantity=1,
+                unit_price=40000.0,
+                taxable_value=40000.0,
+                tax_rate=18.0,
+                tax_type=TaxType.IGST,
+                igst_amount=7200.0,
+                total_amount=47200.0,
+            ),
+        ],
+        total_taxable_value=40000.0,
+        total_tax=7200.0,
+        total_invoice_value=47200.0,  # Strictly < 50,000 → e-way OPTIONAL
+        eway_bill_number="",  # Legitimately empty
+    ),
+    # Invoice 3: REAL ISSUE — recipient GSTIN starts with "07" but the
+    # recipient_state_code says "27". Auto-validator catches this as a
+    # gstin_state_consistency violation.
+    Invoice(
+        invoice_id="INV-H4-003",
+        invoice_number="INV/2025/0803",
+        invoice_date="2025-04-04",
+        supplier_name="Pune Office Furniture",
+        supplier_gstin="27AABCO5555V1Z6",
+        supplier_state_code="27",
+        recipient_name="Mystery Buyer Ltd",
+        # Recipient state declared as "27" (Maharashtra) but the GSTIN's
+        # 2-digit prefix is "07" (Delhi). Inconsistency.
+        recipient_gstin="07BCDEM6666W1Z4",
+        recipient_state_code="27",  # MISMATCH with GSTIN prefix
+        place_of_supply="27",
+        supply_type="B2B",
+        line_items=[
+            InvoiceLineItem(
+                description="Executive desk",
+                hsn_code="9403",
+                quantity=8,
+                unit_price=15000.0,
+                taxable_value=120000.0,
+                tax_rate=18.0,
+                tax_type=TaxType.CGST_SGST,
+                cgst_amount=10800.0,
+                sgst_amount=10800.0,
+                total_amount=141600.0,
+            ),
+        ],
+        total_taxable_value=120000.0,
+        total_tax=21600.0,
+        total_invoice_value=141600.0,
+    ),
+]
+
+
 def get_hard_task(task_id: str) -> tuple[TaskInfo, list[Invoice], list[GroundTruthIssue]]:
     """Return task info, invoices, and ground truth issues for a hard task."""
     tasks = {
         "hard_1": (TASK_H1_INFO, TASK_H1_INVOICES),
         "hard_2": (TASK_H2_INFO, TASK_H2_INVOICES),
         "hard_3": (TASK_H3_INFO, TASK_H3_INVOICES),
+        "hard_4": (TASK_H4_INFO, TASK_H4_INVOICES),
     }
 
     if task_id not in tasks:

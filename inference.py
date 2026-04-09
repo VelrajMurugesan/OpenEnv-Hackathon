@@ -46,7 +46,7 @@ client = OpenAI(
 TASK_IDS = [
     "easy_1", "easy_2", "easy_3",
     "medium_1", "medium_2", "medium_3",
-    "hard_1", "hard_2", "hard_3",
+    "hard_1", "hard_2", "hard_3", "hard_4",
 ]
 
 # Action ID mapping for the [STEP] log — the validator expects an integer
@@ -130,24 +130,33 @@ def emit_step(
     action_id: int,
     done: bool,
 ) -> None:
-    """Emit the canonical [STEP] line for a single env step."""
+    """Emit the canonical [STEP] line for a single env step.
+
+    Matches the *current* ArjunMadhava/meta-hackathon-2026 canonical format,
+    which prints only `task`, `step`, `reward` (the verbose `action`/`done`
+    fields were removed from the canonical sample after the validator was
+    tightened). Action ID and done flag are kept in the function signature
+    for internal callers but no longer printed.
+    """
     print(
-        "[STEP] "
-        f"task={task_id} "
-        f"step={step_count} "
-        f"reward={float(reward):.4f} "
-        f"action={action_id} "
-        f"done={str(bool(done)).lower()}",
+        f"[STEP] task={task_id} step={step_count} reward={float(reward):.4f}",
         flush=True,
     )
 
 
 def emit_end(task_id: str, score: float, steps: int, status: str) -> None:
     """Emit the canonical [END] line for a finished task. The score is always
-    clamped strictly into (0, 1) to satisfy the Phase 2 validator."""
+    clamped strictly into (0, 1) to satisfy the Phase 2 validator.
+
+    Matches the *current* canonical format which prints only `task`, `score`,
+    `steps`. The `status` argument is kept in the function signature for
+    diagnostic purposes but is logged to stderr instead of the protocol line.
+    """
     safe = clamp_score(score)
+    if status and status != "completed":
+        log_diagnostic(f"[INFO] {task_id}: status={status}")
     print(
-        f"[END] task={task_id} score={safe:.4f} steps={steps} status={status}",
+        f"[END] task={task_id} score={safe:.4f} steps={steps}",
         flush=True,
     )
 

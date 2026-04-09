@@ -155,6 +155,14 @@ tasks:
     description: Comprehensive audit combining all validation types on 5 invoices
     max_steps: 35
 
+  - id: hard_4
+    name: Adversarial Edge Cases
+    difficulty: hard
+    description: >
+      Adversarial precision test: 3 invoices that look suspicious but only 1
+      has a real GST violation. Tests false-positive avoidance.
+    max_steps: 20
+
 # ── Infrastructure ──────────────────────────────────────────────────────────
 
 infrastructure:

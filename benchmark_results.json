@@ -1,0 +1,23 @@
+{
+  "env_url": "http://127.0.0.1:7861",
+  "results": [
+    {
+      "model_id": "programmatic",
+      "label": "Programmatic Only (no LLM)",
+      "average": 0.9911200000000001,
+      "per_task": {
+        "easy_1": 0.9998,
+        "easy_2": 0.9998,
+        "easy_3": 0.9998,
+        "medium_1": 0.9998,
+        "medium_2": 0.913,
+        "medium_3": 0.9998,
+        "hard_1": 0.9998,
+        "hard_2": 0.9998,
+        "hard_3": 0.9998,
+        "hard_4": 0.9998
+      },
+      "error": ""
+    }
+  ]
+}
