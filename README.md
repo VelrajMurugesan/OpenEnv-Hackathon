@@ -192,7 +192,19 @@ These failure modes are now embedded as ground-truth scoring tests, so any agent
 
 ### Try it in Colab (no install)
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/VelrajMurugesan/OpenEnv-Hackathon/blob/master/notebooks/quickstart.ipynb)
+| Notebook | What it does | Hardware |
+|---|---|---|
+| [![Quickstart in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/VelrajMurugesan/OpenEnv-Hackathon/blob/master/notebooks/quickstart.ipynb) | Connect to the live HF Space and walk through `reset → flag_issue → approve → submit_report` end-to-end. Includes the adversarial `hard_4` task. | CPU only |
+| [![Training in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/VelrajMurugesan/OpenEnv-Hackathon/blob/master/notebooks/training.ipynb) | Train your own GST auditor: SFT-distill the rules engine into Qwen2.5-0.5B with LoRA, then optionally do online RL via TRL's GRPO using the env's reward as the training signal. | T4 (free Colab) for SFT, A100 for GRPO |
+
+### Train your own agent
+
+The **[`notebooks/training.ipynb`](notebooks/training.ipynb)** notebook ships two complementary training recipes:
+
+1. **Supervised distillation.** The deterministic GST rules engine in `data/gst_rules.py` already produces gold-standard ground truth for every task — we treat those findings as expert demonstrations and SFT-fine-tune **Qwen2.5-0.5B-Instruct** with **LoRA** to imitate the rules. No human annotation required. Trains in ~15 minutes on a free Colab T4. The result is a sub-1B-parameter model that scores comparably to the full deterministic baseline on this benchmark.
+2. **Online RL via GRPO.** Once you have a base policy from SFT, you can keep going with [TRL's `GRPOTrainer`](https://huggingface.co/docs/trl/main/en/grpo_trainer) using the env's reward signal directly. The reward function is a thin Python wrapper around the live HF Space `/step` endpoint — sample rollouts from the policy, submit the JSON findings to the env, return the F1 score, normalize advantages within each group, apply the policy update. The notebook ships the full recipe; uncomment `.train()` once you're on adequate hardware (A100 or larger).
+
+The two recipes are complementary, not alternatives. SFT gets you to ~0.99 fast and cheap by distilling explicit rules. GRPO is for the next mile: teaching the agent the long tail of issues the rules don't yet encode.
 
 ### Run locally
 
