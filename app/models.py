@@ -77,6 +77,12 @@ class GroundTruthIssue(BaseModel):
     description: str
     expected_value: str = ""
     actual_value: str = ""
+    # Optional citation to the actual Indian GST legal source (CGST/IGST Act
+    # section, CGST Rule, or CBIC notification). Populated by the rules engine
+    # in data/gst_rules.py so that every ground-truth issue is traceable back
+    # to the specific statute that makes it a violation. Agents and users can
+    # surface this in UIs or eval reports.
+    legal_reference: str = ""
 
 
 # ── OpenEnv API Models ──────────────────────────────────────────────────────

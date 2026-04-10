@@ -1,4 +1,22 @@
-"""GST validation rules engine."""
+"""GST validation rules engine.
+
+Every ground-truth issue emitted by this module carries a `legal_reference`
+string pointing to the actual Indian GST statute that makes the finding a
+violation — the CGST/IGST Act section, the CGST Rule, or the CBIC
+notification. This makes the benchmark auditable by real Chartered
+Accountants and GST practitioners, and it gives downstream LLMs a
+structured signal they can cite in agent outputs.
+
+References used throughout:
+
+  - **CGST Act 2017**, Sections 9, 10, 25, 31
+  - **IGST Act 2017**, Sections 7, 8
+  - **CGST Rules 2017**, Rules 10, 46, 138
+  - **Notification 1/2017-Central Tax (Rate)** — HSN code → tax rate mapping for goods
+  - **Notification 11/2017-Central Tax (Rate)** — SAC code → tax rate mapping for services
+  - **Notification 13/2017-Central Tax (Rate)** — services liable to Reverse Charge
+  - **Notification 12/2018-Central Tax** — E-way bill threshold (INR 50,000)
+"""
 
 from __future__ import annotations
 
@@ -17,6 +35,75 @@ from app.models import (
     IssueCategory,
     IssueSeverity,
 )
+
+
+# ── Legal reference lookup ──────────────────────────────────────────────────
+#
+# Maps (category, field) to the specific Indian GST statute citation. This
+# is used by every validator so that judges, auditors, and downstream
+# systems can trace any ground-truth finding back to the law that defines
+# it. Fallback order: (category, field_prefix) → category alone → generic.
+
+_LEGAL_BY_FIELD: dict[tuple[str, str], str] = {
+    # --- mandatory fields (CGST Rule 46 lists required fields on a tax invoice) ---
+    (IssueCategory.MISSING_FIELD.value, "invoice_number"):    "CGST Rule 46(b); CGST Act s.31",
+    (IssueCategory.MISSING_FIELD.value, "invoice_date"):      "CGST Rule 46(c); CGST Act s.31",
+    (IssueCategory.MISSING_FIELD.value, "supplier_name"):     "CGST Rule 46(a)",
+    (IssueCategory.MISSING_FIELD.value, "supplier_gstin"):    "CGST Rule 46(a); CGST Act s.25",
+    (IssueCategory.MISSING_FIELD.value, "recipient_name"):    "CGST Rule 46(e)",
+    (IssueCategory.MISSING_FIELD.value, "recipient_gstin"):   "CGST Rule 46(f); CGST Act s.25",
+    (IssueCategory.MISSING_FIELD.value, "place_of_supply"):   "CGST Rule 46(h); IGST Act s.10-13",
+    (IssueCategory.MISSING_FIELD.value, "line_items"):        "CGST Rule 46(g)",
+    (IssueCategory.MISSING_FIELD.value, "hsn_code"):          "CGST Rule 46(g); Notification 78/2020",
+
+    # --- format violations ---
+    (IssueCategory.INVALID_FORMAT.value, "supplier_gstin"):   "CGST Rule 10; CGST Act s.25(6A)",
+    (IssueCategory.INVALID_FORMAT.value, "recipient_gstin"):  "CGST Rule 10; CGST Act s.25(6A)",
+    (IssueCategory.INVALID_FORMAT.value, "invoice_date"):     "CGST Rule 46(c)",
+    (IssueCategory.INVALID_FORMAT.value, "supplier_state_code"):  "CGST Rule 10; state code schedule",
+    (IssueCategory.INVALID_FORMAT.value, "recipient_state_code"): "CGST Rule 10; state code schedule",
+    (IssueCategory.INVALID_FORMAT.value, "place_of_supply"):  "CGST Rule 10; state code schedule",
+    (IssueCategory.INVALID_FORMAT.value, "hsn_code"):         "CGST Rule 46(g); Customs Tariff Act",
+    (IssueCategory.INVALID_FORMAT.value, "eway_bill_number"): "CGST Rule 138(1); 12-digit EBN format",
+
+    # --- inconsistencies ---
+    (IssueCategory.INCONSISTENCY.value, "supplier_state_code"):  "CGST Rule 10 — GSTIN prefix must equal declared state code",
+    (IssueCategory.INCONSISTENCY.value, "recipient_state_code"): "CGST Rule 10 — GSTIN prefix must equal declared state code",
+
+    # --- compliance violations ---
+    (IssueCategory.COMPLIANCE_VIOLATION.value, "eway_bill_number"):    "CGST Rule 138(1); Notification 12/2018 — E-way bill mandatory above INR 50,000",
+    (IssueCategory.COMPLIANCE_VIOLATION.value, "reverse_charge"):      "CGST Act s.9(3); Notification 13/2017 — RCM for notified services",
+    (IssueCategory.COMPLIANCE_VIOLATION.value, "is_composition_scheme"): "CGST Act s.10(4) — Composition dealer cannot pay tax under RCM",
+    (IssueCategory.COMPLIANCE_VIOLATION.value, "supply_type"):         "CGST Act s.10(2)(c) — Composition dealer restricted to intra-state supply",
+}
+
+_LEGAL_BY_CATEGORY: dict[str, str] = {
+    IssueCategory.MISSING_FIELD.value:        "CGST Rule 46",
+    IssueCategory.INVALID_FORMAT.value:       "CGST Rule 46",
+    IssueCategory.WRONG_VALUE.value:          "CGST Rule 46; Notification 1/2017 & 11/2017 (Rate)",
+    IssueCategory.TAX_MISMATCH.value:         "IGST Act s.7-8; CGST Act s.12-13 — place of supply rules",
+    IssueCategory.COMPLIANCE_VIOLATION.value: "CGST Act s.9-10; CGST Rule 138",
+    IssueCategory.INCONSISTENCY.value:        "CGST Rule 10",
+    IssueCategory.DUPLICATE.value:            "CGST Rule 46(b) — consecutive serial number unique per financial year",
+}
+
+
+def get_legal_reference(category: IssueCategory | str, field: str = "") -> str:
+    """Resolve the best-matching legal citation for an issue.
+
+    Tries (category, exact_field) first, then (category, field_tail) for
+    nested paths like `line_items[0].cgst_amount`, then falls back to the
+    category-level default.
+    """
+    cat_value = category.value if isinstance(category, IssueCategory) else str(category)
+    if field:
+        if (cat_value, field) in _LEGAL_BY_FIELD:
+            return _LEGAL_BY_FIELD[(cat_value, field)]
+        # Handle nested paths: "line_items[0].tax_rate" -> "tax_rate"
+        tail = field.split(".")[-1] if "." in field else field
+        if (cat_value, tail) in _LEGAL_BY_FIELD:
+            return _LEGAL_BY_FIELD[(cat_value, tail)]
+    return _LEGAL_BY_CATEGORY.get(cat_value, "Indian GST Act 2017")
 
 
 def validate_gstin_format(gstin: str) -> bool:
@@ -580,6 +667,17 @@ def detect_duplicate_invoices(invoices: list[Invoice]) -> list[GroundTruthIssue]
 
 # ── Aggregated Validators ───────────────────────────────────────────────────
 
+
+def _annotate_with_legal_refs(issues: list[GroundTruthIssue]) -> list[GroundTruthIssue]:
+    """Populate the `legal_reference` field on any issue that doesn't already
+    carry one. This lets the individual validators stay concise while every
+    ground-truth issue still carries an auditable citation."""
+    for issue in issues:
+        if not issue.legal_reference:
+            issue.legal_reference = get_legal_reference(issue.category, issue.field)
+    return issues
+
+
 def run_easy_validation(invoice: Invoice) -> list[GroundTruthIssue]:
     """Easy: mandatory fields + GSTIN format + HSN + basic tax rate checks."""
     issues = []
@@ -589,7 +687,7 @@ def run_easy_validation(invoice: Invoice) -> list[GroundTruthIssue]:
     issues.extend(validate_tax_rates(invoice))
     issues.extend(validate_invoice_date(invoice))
     issues.extend(validate_state_codes(invoice))
-    return issues
+    return _annotate_with_legal_refs(issues)
 
 
 def run_medium_validation(invoice: Invoice) -> list[GroundTruthIssue]:
@@ -599,7 +697,7 @@ def run_medium_validation(invoice: Invoice) -> list[GroundTruthIssue]:
     issues.extend(validate_arithmetic(invoice))
     issues.extend(validate_gstin_state_consistency(invoice))
     issues.extend(validate_eway_bill(invoice))
-    return issues
+    return _annotate_with_legal_refs(issues)
 
 
 def run_hard_validation(invoice: Invoice) -> list[GroundTruthIssue]:
@@ -607,7 +705,7 @@ def run_hard_validation(invoice: Invoice) -> list[GroundTruthIssue]:
     issues = run_medium_validation(invoice)
     issues.extend(validate_reverse_charge(invoice))
     issues.extend(validate_composition_scheme(invoice))
-    return issues
+    return _annotate_with_legal_refs(issues)
 
 
 def run_batch_validation(invoices: list[Invoice]) -> list[GroundTruthIssue]:
@@ -616,4 +714,4 @@ def run_batch_validation(invoices: list[Invoice]) -> list[GroundTruthIssue]:
     for inv in invoices:
         issues.extend(run_hard_validation(inv))
     issues.extend(detect_duplicate_invoices(invoices))
-    return issues
+    return _annotate_with_legal_refs(issues)

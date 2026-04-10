@@ -219,6 +219,8 @@ def grade_findings(
             "field": ground_truth[i].field,
             "description": ground_truth[i].description,
             "severity": ground_truth[i].severity.value,
+            "category": ground_truth[i].category.value,
+            "legal_reference": ground_truth[i].legal_reference,
         }
         for i in range(len(ground_truth))
         if i not in matched_truth_indices
@@ -229,6 +231,53 @@ def grade_findings(
         for i in range(len(findings))
         if i not in matched_finding_indices
     ]
+
+    # Per-category F1 breakdown — tells users *where* the agent is weak, not
+    # just the overall F1. This is what serious industrial benchmarks expose
+    # (e.g. LegalBench per-task, HELM per-scenario) and makes the env useful
+    # for targeted training ablations.
+    categories_seen: set[str] = set()
+    for issue in ground_truth:
+        categories_seen.add(issue.category.value)
+    for finding in findings:
+        cat = finding.get("category", "")
+        if cat:
+            categories_seen.add(cat)
+
+    category_breakdown: dict[str, dict[str, float | int]] = {}
+    for cat in sorted(categories_seen):
+        cat_gt_indices = {
+            i for i, issue in enumerate(ground_truth)
+            if issue.category.value == cat
+        }
+        cat_finding_indices = {
+            i for i, finding in enumerate(findings)
+            if finding.get("category", "") == cat
+        }
+        cat_matched_gt = cat_gt_indices & matched_truth_indices
+        cat_matched_findings = cat_finding_indices & matched_finding_indices
+
+        cat_tp = len(cat_matched_gt)
+        cat_fp = len(cat_finding_indices - cat_matched_findings)
+        cat_fn = len(cat_gt_indices - cat_matched_gt)
+
+        cat_precision = cat_tp / (cat_tp + cat_fp) if (cat_tp + cat_fp) > 0 else 0.0
+        cat_recall = cat_tp / (cat_tp + cat_fn) if (cat_tp + cat_fn) > 0 else 0.0
+        cat_f1 = (
+            2 * cat_precision * cat_recall / (cat_precision + cat_recall)
+            if (cat_precision + cat_recall) > 0 else 0.0
+        )
+
+        category_breakdown[cat] = {
+            "true_positives": cat_tp,
+            "false_positives": cat_fp,
+            "false_negatives": cat_fn,
+            "ground_truth_count": len(cat_gt_indices),
+            "finding_count": len(cat_finding_indices),
+            "precision": round(cat_precision, 4),
+            "recall": round(cat_recall, 4),
+            "f1": round(cat_f1, 4),
+        }
 
     return GraderResult(
         task_id=task_id,
@@ -242,6 +291,7 @@ def grade_findings(
             "missed_issues": len(missed),
             "total_ground_truth": len(ground_truth),
             "total_findings": len(findings),
+            "category_breakdown": category_breakdown,
             "missed_details": missed[:10],  # Cap for readability
             "false_positive_details": false_positives[:10],
         },
