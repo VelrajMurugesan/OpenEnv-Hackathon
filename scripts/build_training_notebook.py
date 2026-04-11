@@ -463,82 +463,87 @@ The reward function below is a thin wrapper around the env: parse the model's JS
 """))
 
 cells.append(code(r"""
-import inspect
-from trl import GRPOConfig, GRPOTrainer
+# This cell is a RECIPE — it shows how to set up GRPO but does NOT run
+# training (.train() is commented out). If trl is unavailable due to a
+# Colab kernel restart, we skip gracefully.
+try:
+    import inspect
+    from trl import GRPOConfig, GRPOTrainer
+except ImportError:
+    print("trl not available (Colab may have restarted the kernel).")
+    print("The GRPO recipe is visible in the cell source code above.")
+    print("To run it: restart runtime, run cell 1 (install), then this cell.")
+    GRPOConfig = None
 
-PROMPTS = [
-    {
-        "task_id": d["task_id"],
-        "prompt": tokenizer.apply_chat_template(
-            [
-                {"role": "system", "content": SYSTEM_INSTRUCTION},
-                {"role": "user", "content": d["user"]},
-            ],
-            tokenize=False,
-            add_generation_prompt=True,
-        ),
-    }
-    for d in dataset
-]
-prompt_dataset = Dataset.from_list(PROMPTS)
+if GRPOConfig is not None:
+    PROMPTS = [
+        {
+            "task_id": d["task_id"],
+            "prompt": tokenizer.apply_chat_template(
+                [
+                    {"role": "system", "content": SYSTEM_INSTRUCTION},
+                    {"role": "user", "content": d["user"]},
+                ],
+                tokenize=False,
+                add_generation_prompt=True,
+            ),
+        }
+        for d in dataset
+    ]
+    prompt_dataset = Dataset.from_list(PROMPTS)
 
+    def env_reward_function(prompts, completions, task_id, **kwargs):
+        rewards = []
+        for tid, completion in zip(task_id, completions):
+            client.post("/reset", json={"task_id": tid})
+            findings = parse_findings_from_response(completion)
+            for finding in findings:
+                if not isinstance(finding, dict):
+                    continue
+                client.post("/step", json={"action": {
+                    "action": "flag_issue",
+                    "invoice_id": finding.get("invoice_id", ""),
+                    "field": finding.get("field", ""),
+                    "category": finding.get("category", ""),
+                    "severity": finding.get("severity", "major"),
+                    "description": finding.get("description", ""),
+                }})
+            result = client.post("/step", json={"action": {"action": "submit_report"}}).json()
+            obs = result.get("observation", result.get("state", {}))
+            rewards.append(float(obs.get("score", 0.0)))
+        return rewards
 
-def env_reward_function(prompts, completions, task_id, **kwargs):
-    rewards = []
-    for tid, completion in zip(task_id, completions):
-        client.post("/reset", json={"task_id": tid})
-        findings = parse_findings_from_response(completion)
-        for finding in findings:
-            if not isinstance(finding, dict):
-                continue
-            client.post("/step", json={"action": {
-                "action": "flag_issue",
-                "invoice_id": finding.get("invoice_id", ""),
-                "field": finding.get("field", ""),
-                "category": finding.get("category", ""),
-                "severity": finding.get("severity", "major"),
-                "description": finding.get("description", ""),
-            }})
-        result = client.post("/step", json={"action": {"action": "submit_report"}}).json()
-        obs = result.get("observation", result.get("state", {}))
-        rewards.append(float(obs.get("score", 0.0)))
-    return rewards
+    _grpo_params = inspect.signature(GRPOConfig).parameters
+    grpo_kwargs = dict(
+        output_dir="./gst-auditor-qwen-0.5b-grpo",
+        learning_rate=5e-6,
+        num_train_epochs=1,
+        per_device_train_batch_size=1,
+        bf16=torch.cuda.is_bf16_supported(),
+        fp16=not torch.cuda.is_bf16_supported(),
+        logging_steps=1,
+        save_strategy="epoch",
+        report_to="none",
+    )
+    for name, val in [
+        ("num_generations", 4),
+        ("max_prompt_length", 2048),
+        ("max_completion_length", 1024),
+    ]:
+        if name in _grpo_params:
+            grpo_kwargs[name] = val
 
+    grpo_config = GRPOConfig(**grpo_kwargs)
 
-_grpo_params = inspect.signature(GRPOConfig).parameters
-
-grpo_kwargs = dict(
-    output_dir="./gst-auditor-qwen-0.5b-grpo",
-    learning_rate=5e-6,
-    num_train_epochs=1,
-    per_device_train_batch_size=1,
-    bf16=torch.cuda.is_bf16_supported(),
-    fp16=not torch.cuda.is_bf16_supported(),
-    logging_steps=1,
-    save_strategy="epoch",
-    report_to="none",
-)
-
-# These parameter names vary across TRL versions
-for name, val in [
-    ("num_generations", 4),
-    ("max_prompt_length", 2048),
-    ("max_completion_length", 1024),
-]:
-    if name in _grpo_params:
-        grpo_kwargs[name] = val
-
-grpo_config = GRPOConfig(**grpo_kwargs)
-
-# Uncomment once you have adequate GPU memory (A100 40GB or larger):
-#
-# grpo_trainer = GRPOTrainer(
-#     model=model,
-#     reward_funcs=env_reward_function,
-#     args=grpo_config,
-#     train_dataset=prompt_dataset,
-# )
-# grpo_trainer.train()
+    # Uncomment once you have adequate GPU memory (A100 40GB or larger):
+    #
+    # grpo_trainer = GRPOTrainer(
+    #     model=model,
+    #     reward_funcs=env_reward_function,
+    #     args=grpo_config,
+    #     train_dataset=prompt_dataset,
+    # )
+    # grpo_trainer.train()
 
 print("GRPO trainer configured. Uncomment the .train() call once on adequate GPU.")
 """))
