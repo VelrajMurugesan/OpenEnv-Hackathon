@@ -463,6 +463,7 @@ The reward function below is a thin wrapper around the env: parse the model's JS
 """))
 
 cells.append(code(r"""
+import inspect
 from trl import GRPOConfig, GRPOTrainer
 
 PROMPTS = [
@@ -504,11 +505,10 @@ def env_reward_function(prompts, completions, task_id, **kwargs):
     return rewards
 
 
-grpo_config = GRPOConfig(
+_grpo_params = inspect.signature(GRPOConfig).parameters
+
+grpo_kwargs = dict(
     output_dir="./gst-auditor-qwen-0.5b-grpo",
-    num_generations=4,
-    max_prompt_length=2048,
-    max_completion_length=1024,
     learning_rate=5e-6,
     num_train_epochs=1,
     per_device_train_batch_size=1,
@@ -518,6 +518,17 @@ grpo_config = GRPOConfig(
     save_strategy="epoch",
     report_to="none",
 )
+
+# These parameter names vary across TRL versions
+for name, val in [
+    ("num_generations", 4),
+    ("max_prompt_length", 2048),
+    ("max_completion_length", 1024),
+]:
+    if name in _grpo_params:
+        grpo_kwargs[name] = val
+
+grpo_config = GRPOConfig(**grpo_kwargs)
 
 # Uncomment once you have adequate GPU memory (A100 40GB or larger):
 #
