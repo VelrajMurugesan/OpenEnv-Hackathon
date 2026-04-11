@@ -305,8 +305,13 @@ If you only want to verify the recipe runs, set `num_train_epochs=1` for a faste
 
 cells.append(code(r"""
 from trl import SFTConfig, SFTTrainer
+from transformers import TrainingArguments
 
-sft_config = SFTConfig(
+# TRL versions differ on parameter names. We detect which one to use.
+import inspect
+_sft_params = inspect.signature(SFTConfig).parameters
+
+sft_kwargs = dict(
     output_dir="./gst-auditor-qwen-0.5b",
     num_train_epochs=3,
     per_device_train_batch_size=1,
@@ -318,10 +323,20 @@ sft_config = SFTConfig(
     save_strategy="epoch",
     bf16=torch.cuda.is_bf16_supported(),
     fp16=not torch.cuda.is_bf16_supported(),
-    max_seq_length=4096,
-    dataset_text_field="text",
     report_to="none",
 )
+
+# max_seq_length vs max_length — name changed across TRL versions
+if "max_seq_length" in _sft_params:
+    sft_kwargs["max_seq_length"] = 4096
+elif "max_length" in _sft_params:
+    sft_kwargs["max_length"] = 4096
+
+# dataset_text_field — removed in newer TRL versions
+if "dataset_text_field" in _sft_params:
+    sft_kwargs["dataset_text_field"] = "text"
+
+sft_config = SFTConfig(**sft_kwargs)
 
 trainer = SFTTrainer(
     model=model,
