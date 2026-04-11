@@ -116,7 +116,8 @@ Let's see it for ourselves on `easy_1`.
 """))
 
 cells.append(code(r"""
-state = client.post("/reset", json={"task_id": "easy_1"}).json()
+resp = client.post("/reset", json={"task_id": "easy_1"}).json()
+state = resp.get("observation", resp)  # unwrap create_app() response
 print(f"Reset to task: {state['task_id']}, invoices: {len(state['invoices'])}")
 print()
 
@@ -144,7 +145,8 @@ print(f"False flag   -> reward {r2['reward']:+.4f}")
 
 # Action 3: submit report -- final F1 score
 r3 = client.post("/step", json={"action": {"action": "submit_report"}}).json()
-print(f"Submit       -> reward {r3['reward']:+.4f}  (final score = {r3['state']['score']})")
+obs3 = r3.get("observation", r3.get("state", {}))
+print(f"Submit       -> reward {r3['reward']:+.4f}  (final score = {obs3.get('score')})")
 """))
 
 # ─── Part 3: SFT data generation ─────────────────────────────────────────
@@ -409,7 +411,8 @@ def evaluate_task(task_id):
         }})
 
     result = client.post("/step", json={"action": {"action": "submit_report"}}).json()
-    return result["state"]["score"], len(findings)
+    obs = result.get("observation", result.get("state", {}))
+    return obs.get("score", 0.0), len(findings)
 
 
 print(f"{'Task':12s}  {'Score':>8s}  {'Flagged':>8s}")
@@ -476,7 +479,8 @@ def env_reward_function(prompts, completions, task_id, **kwargs):
                 "description": finding.get("description", ""),
             }})
         result = client.post("/step", json={"action": {"action": "submit_report"}}).json()
-        rewards.append(float(result["state"]["score"]))
+        obs = result.get("observation", result.get("state", {}))
+        rewards.append(float(obs.get("score", 0.0)))
     return rewards
 
 
