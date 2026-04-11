@@ -493,9 +493,12 @@ def run_task(task_id: str) -> float:
     status = "completed"
 
     try:
-        # Reset environment
-        state = env_request("POST", "/reset", {"task_id": task_id})
-        invoices = state.get("invoices", [])
+        # Reset environment.
+        # create_app() wraps the response as {"observation": {...}, "reward", "done"}.
+        # We detect the format automatically for backward compat.
+        raw_reset = env_request("POST", "/reset", {"task_id": task_id})
+        obs = raw_reset.get("observation", raw_reset)  # unwrap if present
+        invoices = obs.get("invoices", [])
         log_diagnostic(f"[INFO] {task_id}: reset ok ({len(invoices)} invoices)")
 
         # ── Pass 1: Programmatic rule-based audit ──
@@ -577,13 +580,29 @@ def run_task(task_id: str) -> float:
                 done=bool(result.get("done", False)),
             )
 
-        raw_score = result.get("state", {}).get("score") if result else None
+        # Extract score from response — create_app() nests under "observation",
+        # old server nests under "state". Try both paths.
+        if result:
+            obs_data = result.get("observation", result.get("state", {}))
+            raw_score = obs_data.get("score")
+        else:
+            raw_score = None
         if raw_score is None:
             log_diagnostic(f"[WARN] {task_id}: no score in final state, defaulting to floor")
             status = "incomplete"
         final_score = clamp_score(raw_score if raw_score is not None else SCORE_MIN)
 
-        grader_info = (result or {}).get("info", {}).get("grader_result", {}).get("details", {})
+        # Extract grader details — create_app() puts info in observation.metadata,
+        # old server puts it in info directly.
+        if result:
+            obs_meta = result.get("observation", {}).get("metadata", {})
+            old_info = result.get("info", {})
+            grader_info = (
+                obs_meta.get("grader_result", {}).get("details", {})
+                or old_info.get("grader_result", {}).get("details", {})
+            )
+        else:
+            grader_info = {}
         log_diagnostic(
             f"[INFO] {task_id}: score={final_score:.4f} "
             f"precision={grader_info.get('precision', 0)} "

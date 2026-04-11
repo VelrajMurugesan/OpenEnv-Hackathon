@@ -199,17 +199,20 @@ def test_ground_truth_exists_for_all_tasks():
 
 
 def test_fastapi_app_loads():
-    """Verify the FastAPI app initializes without errors."""
-    from app.main import app
-    assert app.title == "GST Invoice Compliance Checker — OpenEnv"
+    """Verify the OpenEnv server app initializes with required routes."""
+    from server.app import app
     routes = [r.path for r in app.routes]
-    assert "/reset" in routes
-    assert "/state" in routes
+    # OpenEnv framework endpoints (auto-registered by create_app())
+    assert "/reset" in routes, f"/reset missing, routes: {routes}"
     assert "/step" in routes
+    assert "/state" in routes
+    assert "/health" in routes
+    assert "/metadata" in routes
+    assert "/schema" in routes
+    # Custom convenience endpoints
     assert "/tasks" in routes
     assert "/info" in routes
-    assert "/grade" in routes
-    print("  [PASS] FastAPI app loads with all routes")
+    print("  [PASS] OpenEnv app loads with all required routes")
 
 
 if __name__ == "__main__":
