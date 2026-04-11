@@ -360,25 +360,30 @@ def generate_findings(task_id, max_new_tokens=2048):
     invoices_json = json.dumps([inv.model_dump() for inv in invoices], indent=2)
     user_msg = f"INVOICES:\n{invoices_json}\n\nReturn the JSON array of findings."
 
-    inputs = tokenizer.apply_chat_template(
+    # Build the prompt text, then tokenize separately (avoids BatchEncoding
+    # compatibility issues across transformers versions).
+    prompt_text = tokenizer.apply_chat_template(
         [
             {"role": "system", "content": SYSTEM_INSTRUCTION},
             {"role": "user", "content": user_msg},
         ],
-        return_tensors="pt",
+        tokenize=False,
         add_generation_prompt=True,
-    ).to(model.device)
+    )
+    encoded = tokenizer(prompt_text, return_tensors="pt")
+    input_ids = encoded["input_ids"].to(model.device)
+    attention_mask = encoded["attention_mask"].to(model.device)
 
     with torch.no_grad():
         outputs = model.generate(
-            inputs,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
             max_new_tokens=max_new_tokens,
             do_sample=False,
-            temperature=0.0,
             pad_token_id=tokenizer.eos_token_id,
         )
 
-    response = tokenizer.decode(outputs[0][inputs.shape[1]:], skip_special_tokens=True)
+    response = tokenizer.decode(outputs[0][input_ids.shape[1]:], skip_special_tokens=True)
     return response
 
 
